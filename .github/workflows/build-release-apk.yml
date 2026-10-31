@@ -1,0 +1,173 @@
+name: Build Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Android project
+        run: |
+          mkdir -p app/src/main/java/com/example/floatapp app/src/main/res/values
+
+          printf '%s\n' \
+            'pluginManagement {' \
+            '    repositories {' \
+            '        google()' \
+            '        mavenCentral()' \
+            '        gradlePluginPortal()' \
+            '    }' \
+            '}' \
+            '' \
+            'dependencyResolutionManagement {' \
+            '    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)' \
+            '    repositories {' \
+            '        google()' \
+            '        mavenCentral()' \
+            '    }' \
+            '}' \
+            '' \
+            'rootProject.name = "Float"' \
+            'include(":app")' \
+            > settings.gradle.kts
+
+          printf '%s\n' \
+            'plugins {' \
+            '    id("com.android.application") version "8.10.1" apply false' \
+            '}' \
+            > build.gradle.kts
+
+          printf '%s\n' \
+            'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' \
+            'android.nonTransitiveRClass=true' \
+            > gradle.properties
+
+          printf '%s\n' \
+            'import java.util.Base64' \
+            '' \
+            'plugins {' \
+            '    id("com.android.application")' \
+            '}' \
+            '' \
+            'android {' \
+            '    namespace = "com.example.floatapp"' \
+            '    compileSdk = 35' \
+            '    defaultConfig {' \
+            '        applicationId = "com.example.floatapp"' \
+            '        minSdk = 24' \
+            '        targetSdk = 35' \
+            '        versionCode = 1' \
+            '        versionName = "1.0"' \
+            '    }' \
+            '    signingConfigs {' \
+            '        create("release") {' \
+            '            val b64 = System.getenv("SHELL_KEYSTORE_BASE64")' \
+            '            val sp = System.getenv("SHELL_KEYSTORE_PASSWORD")' \
+            '            if (!b64.isNullOrBlank() && !sp.isNullOrBlank()) {' \
+            '                val f = layout.buildDirectory.file("signing/release.jks").get().asFile' \
+            '                f.parentFile.mkdirs()' \
+            '                f.writeBytes(Base64.getDecoder().decode(b64.trim()))' \
+            '                storeFile = f' \
+            '                storePassword = sp' \
+            '                keyAlias = System.getenv("SHELL_KEY_ALIAS")' \
+            '                keyPassword = System.getenv("SHELL_KEY_PASSWORD")' \
+            '            }' \
+            '        }' \
+            '    }' \
+            '    buildTypes {' \
+            '        release {' \
+            '            isMinifyEnabled = false' \
+            '            signingConfig = if (signingConfigs.getByName("release").storeFile != null) signingConfigs.getByName("release") else null' \
+            '        }' \
+            '    }' \
+            '    compileOptions {' \
+            '        sourceCompatibility = JavaVersion.VERSION_17' \
+            '        targetCompatibility = JavaVersion.VERSION_17' \
+            '    }' \
+            '}' \
+            > app/build.gradle.kts
+
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<manifest xmlns:android="http://schemas.android.com/apk/res/android">' \
+            '' \
+            '    <application' \
+            '        android:label="@string/app_name"' \
+            '        android:theme="@android:style/Theme.Material.Light.NoActionBar">' \
+            '        <activity' \
+            '            android:name=".MainActivity"' \
+            '            android:exported="true">' \
+            '            <intent-filter>' \
+            '                <action android:name="android.intent.action.MAIN" />' \
+            '                <category android:name="android.intent.category.LAUNCHER" />' \
+            '            </intent-filter>' \
+            '        </activity>' \
+            '    </application>' \
+            '' \
+            '</manifest>' \
+            > app/src/main/AndroidManifest.xml
+
+          printf '%s\n' \
+            'package com.example.floatapp;' \
+            '' \
+            'import android.app.Activity;' \
+            'import android.os.Bundle;' \
+            'import android.widget.TextView;' \
+            '' \
+            'public class MainActivity extends Activity {' \
+            '' \
+            '    @Override' \
+            '    protected void onCreate(Bundle savedInstanceState) {' \
+            '        super.onCreate(savedInstanceState);' \
+            '        TextView textView = new TextView(this);' \
+            '        textView.setText("Float");' \
+            '        textView.setTextSize(24f);' \
+            '        setContentView(textView);' \
+            '    }' \
+            '}' \
+            > app/src/main/java/com/example/floatapp/MainActivity.java
+
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<resources>' \
+            '    <string name="app_name">Float</string>' \
+            '</resources>' \
+            > app/src/main/res/values/strings.xml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build signed APK
+        env:
+          SHELL_KEYSTORE_BASE64: ${{ secrets.SHELL_KEYSTORE_BASE64 }}
+          SHELL_KEYSTORE_PASSWORD: ${{ secrets.SHELL_KEYSTORE_PASSWORD }}
+          SHELL_KEY_ALIAS: ${{ secrets.SHELL_KEY_ALIAS }}
+          SHELL_KEY_PASSWORD: ${{ secrets.SHELL_KEY_PASSWORD }}
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify signature
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: float-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
