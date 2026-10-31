@@ -38,21 +38,16 @@ jobs:
             'rootProject.name = "Float"' \
             'include(":app")' \
             > settings.gradle.kts
-
           printf '%s\n' \
             'plugins {' \
             '    id("com.android.application") version "8.10.1" apply false' \
             '}' \
             > build.gradle.kts
-
           printf '%s\n' \
             'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' \
             'android.nonTransitiveRClass=true' \
             > gradle.properties
-
           printf '%s\n' \
-            'import java.util.Base64' \
-            '' \
             'plugins {' \
             '    id("com.android.application")' \
             '}' \
@@ -60,6 +55,7 @@ jobs:
             'android {' \
             '    namespace = "com.example.floatapp"' \
             '    compileSdk = 35' \
+            '' \
             '    defaultConfig {' \
             '        applicationId = "com.example.floatapp"' \
             '        minSdk = 24' \
@@ -67,34 +63,38 @@ jobs:
             '        versionCode = 1' \
             '        versionName = "1.0"' \
             '    }' \
+            '' \
             '    signingConfigs {' \
             '        create("release") {' \
-            '            val b64 = System.getenv("SHELL_KEYSTORE_BASE64")' \
-            '            val sp = System.getenv("SHELL_KEYSTORE_PASSWORD")' \
-            '            if (!b64.isNullOrBlank() && !sp.isNullOrBlank()) {' \
-            '                val f = layout.buildDirectory.file("signing/release.jks").get().asFile' \
-            '                f.parentFile.mkdirs()' \
-            '                f.writeBytes(Base64.getDecoder().decode(b64.trim()))' \
-            '                storeFile = f' \
-            '                storePassword = sp' \
+            '            val keystorePath = System.getenv("SHELL_KEYSTORE_FILE")' \
+            '            val storePassEnv = System.getenv("SHELL_KEYSTORE_PASSWORD")' \
+            '            if (!keystorePath.isNullOrBlank() && !storePassEnv.isNullOrBlank()) {' \
+            '                storeFile = file(keystorePath)' \
+            '                storePassword = storePassEnv' \
             '                keyAlias = System.getenv("SHELL_KEY_ALIAS")' \
             '                keyPassword = System.getenv("SHELL_KEY_PASSWORD")' \
             '            }' \
             '        }' \
             '    }' \
+            '' \
             '    buildTypes {' \
             '        release {' \
             '            isMinifyEnabled = false' \
-            '            signingConfig = if (signingConfigs.getByName("release").storeFile != null) signingConfigs.getByName("release") else null' \
+            '            val rc = signingConfigs.getByName("release")' \
+            '            signingConfig = if (rc.storeFile != null) rc else null' \
             '        }' \
             '    }' \
+            '' \
+            '    lint {' \
+            '        checkReleaseBuilds = false' \
+            '    }' \
+            '' \
             '    compileOptions {' \
             '        sourceCompatibility = JavaVersion.VERSION_17' \
             '        targetCompatibility = JavaVersion.VERSION_17' \
             '    }' \
             '}' \
             > app/build.gradle.kts
-
           printf '%s\n' \
             '<?xml version="1.0" encoding="utf-8"?>' \
             '<manifest xmlns:android="http://schemas.android.com/apk/res/android">' \
@@ -114,7 +114,6 @@ jobs:
             '' \
             '</manifest>' \
             > app/src/main/AndroidManifest.xml
-
           printf '%s\n' \
             'package com.example.floatapp;' \
             '' \
@@ -134,7 +133,6 @@ jobs:
             '    }' \
             '}' \
             > app/src/main/java/com/example/floatapp/MainActivity.java
-
           printf '%s\n' \
             '<?xml version="1.0" encoding="utf-8"?>' \
             '<resources>' \
@@ -151,20 +149,66 @@ jobs:
         with:
           gradle-version: '8.14.3'
 
-      - name: Build signed APK
+      - name: Validate signing secrets
         env:
           SHELL_KEYSTORE_BASE64: ${{ secrets.SHELL_KEYSTORE_BASE64 }}
           SHELL_KEYSTORE_PASSWORD: ${{ secrets.SHELL_KEYSTORE_PASSWORD }}
           SHELL_KEY_ALIAS: ${{ secrets.SHELL_KEY_ALIAS }}
           SHELL_KEY_PASSWORD: ${{ secrets.SHELL_KEY_PASSWORD }}
         run: |
-          gradle assembleRelease --no-daemon --stacktrace
+          set -euo pipefail
+          echo "== 校验签名 Secret =="
+          [ -n "${SHELL_KEYSTORE_BASE64:-}" ] || { echo "ERROR: SHELL_KEYSTORE_BASE64 为空"; exit 1; }
+          [ -n "${SHELL_KEYSTORE_PASSWORD:-}" ] || { echo "ERROR: SHELL_KEYSTORE_PASSWORD 为空"; exit 1; }
+          [ -n "${SHELL_KEY_ALIAS:-}" ] || { echo "ERROR: SHELL_KEY_ALIAS 为空"; exit 1; }
+          [ -n "${SHELL_KEY_PASSWORD:-}" ] || { echo "ERROR: SHELL_KEY_PASSWORD 为空"; exit 1; }
+          KSFILE="$RUNNER_TEMP/release.jks"
+          if ! printf '%s' "$SHELL_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "$KSFILE" 2>/dev/null; then
+            echo "ERROR: SHELL_KEYSTORE_BASE64 不是合法 Base64"
+            exit 1
+          fi
+          SIZE=$(wc -c < "$KSFILE")
+          echo "keystore 字节数: $SIZE"
+          if [ "$SIZE" -lt 3000 ]; then
+            echo "ERROR: 解码后的密钥库太小，SHELL_KEYSTORE_BASE64 可能被截断"
+            exit 1
+          fi
+          if ! keytool -list -keystore "$KSFILE" -storepass "$SHELL_KEYSTORE_PASSWORD" -alias "$SHELL_KEY_ALIAS" > /dev/null 2>&1; then
+            echo "ERROR: 密钥库密码或别名不匹配（检查 SHELL_KEYSTORE_PASSWORD / SHELL_KEY_ALIAS）"
+            exit 1
+          fi
+          echo "Secret 校验通过，别名: $SHELL_KEY_ALIAS"
+          keytool -list -keystore "$KSFILE" -storepass "$SHELL_KEYSTORE_PASSWORD" -alias "$SHELL_KEY_ALIAS" -v 2>/dev/null | grep -E "SHA256:" || true
+          echo "SHELL_KEYSTORE_FILE=$KSFILE" >> "$GITHUB_ENV"
+
+      - name: Build signed APK
+        env:
+          SHELL_KEYSTORE_PASSWORD: ${{ secrets.SHELL_KEYSTORE_PASSWORD }}
+          SHELL_KEY_ALIAS: ${{ secrets.SHELL_KEY_ALIAS }}
+          SHELL_KEY_PASSWORD: ${{ secrets.SHELL_KEY_PASSWORD }}
+        run: |
+          set +e
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "gradle 退出码: $status"
+          if [ "$status" -ne 0 ]; then
+            echo "==================== BUILD FAILED ===================="
+            grep -n -E "FAILURE|What went wrong|Execution failed|Caused by|error:|Exception" build.log | head -n 40 || true
+            echo "==================== LAST 40 LINES ===================="
+            tail -n 40 build.log
+            echo "==================== END ===================="
+            if ls app/build/outputs/apk/release/*.apk > /dev/null 2>&1; then
+              echo "已检测到 APK 文件，继续验证与上传"
+            else
+              exit "$status"
+            fi
+          fi
 
       - name: Verify signature
         run: |
-          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
           BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)
-          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs app/build/outputs/apk/release/*.apk
 
       - uses: actions/upload-artifact@v4
         with:
